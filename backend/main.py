@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=False)
 
 from gemini_client import GeminiClient
 from github_analyzer import fetch_repo_context
