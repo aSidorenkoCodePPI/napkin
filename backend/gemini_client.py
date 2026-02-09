@@ -15,7 +15,8 @@ class GeminiClient:
         if not api_key:
             raise ValueError("GEMINI_API_KEY environment variable is not set")
         self.client = genai.Client(api_key=api_key)
-        self.model = "gemini-3-flash"
+        self.model = "gemini-3-flash-preview"
+        self.fallback_model = "gemini-2.5-flash"
 
         # Disable thinking for fast structured output (generate, transform)
         self.fast_config = types.GenerateContentConfig(
@@ -26,6 +27,21 @@ class GeminiClient:
             thinking_config=types.ThinkingConfig(thinking_budget=1024),
         )
 
+    def _generate_content(self, contents, config):
+        """Try primary model, fall back to fallback model on failure."""
+        try:
+            return self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=config,
+            )
+        except Exception:
+            return self.client.models.generate_content(
+                model=self.fallback_model,
+                contents=contents,
+                config=config,
+            )
+
     def _analyze_sync(self, mode: str, image_bytes: bytes) -> str:
         prompt = PROMPTS.get(mode)
         if not prompt:
@@ -33,8 +49,7 @@ class GeminiClient:
 
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
 
-        response = self.client.models.generate_content(
-            model=self.model,
+        response = self._generate_content(
             contents=[prompt, image_part],
             config=self.analyze_config,
         )
@@ -56,8 +71,7 @@ class GeminiClient:
         else:
             contents = [GENERATE_PROMPT + "\n\nUser request: " + user_prompt]
 
-        response = self.client.models.generate_content(
-            model=self.model,
+        response = self._generate_content(
             contents=contents,
             config=self.fast_config,
         )
@@ -69,8 +83,7 @@ class GeminiClient:
 
     def _transform_sync(self, image_bytes: bytes) -> str:
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-        response = self.client.models.generate_content(
-            model=self.model,
+        response = self._generate_content(
             contents=[TRANSFORM_PROMPT, image_part],
             config=self.fast_config,
         )
@@ -82,8 +95,7 @@ class GeminiClient:
 
     def _analyze_repo_sync(self, repo_context: str) -> str:
         prompt = GITHUB_ARCHITECTURE_PROMPT.replace("{repo_context}", repo_context)
-        response = self.client.models.generate_content(
-            model=self.model,
+        response = self._generate_content(
             contents=[prompt],
             config=self.fast_config,
         )

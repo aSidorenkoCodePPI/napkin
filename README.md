@@ -29,7 +29,7 @@ Napkin: [creates a clean, color-coded architecture diagram on the canvas]
 | -------- | -------------------------------------------- |
 | Frontend | React 19, TypeScript, Vite, tldraw, Mermaid  |
 | Backend  | Python, FastAPI, uvicorn                      |
-| AI       | Google Gemini 3 Flash                       |
+| AI       | Google Gemini 3 Flash Preview (fallback: 2.5 Flash) |
 | APIs     | GitHub REST API (for repo analysis)           |
 
 ## Getting Started
