@@ -20,7 +20,7 @@ app.add_middleware(
 
 client = GeminiClient()
 
-VALID_MODES = {"label", "cleanup", "suggest", "explain"}
+VALID_MODES = {"label", "cleanup", "suggest", "explain", "optimize"}
 
 
 class AnalyzeRequest(BaseModel):

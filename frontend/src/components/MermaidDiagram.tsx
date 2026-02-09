@@ -3,6 +3,27 @@ import mermaid from 'mermaid';
 
 mermaid.initialize({ startOnLoad: false, theme: 'default' });
 
+/**
+ * Sanitize Mermaid flowchart code: wrap node labels containing
+ * special characters (parentheses, <br>, angle brackets) in double quotes.
+ */
+function sanitizeMermaidCode(code: string): string {
+  // Match flowchart node definitions like A[...], A(...), A{...}, A>...]
+  // and ensure labels with special chars are quoted
+  return code.replace(
+    /(\w+)\[([^\]"]+)\]/g,
+    (_match, nodeId: string, label: string) => {
+      // If label contains special characters that break Mermaid parsing, quote it
+      if (/[()<>{}|&#]|<br\s*\/?>/.test(label)) {
+        // Replace <br> with <br/> for consistency
+        const fixedLabel = label.replace(/<br\s*>/gi, '<br/>');
+        return `${nodeId}["${fixedLabel}"]`;
+      }
+      return _match;
+    }
+  );
+}
+
 interface MermaidDiagramProps {
   code: string;
 }
@@ -17,8 +38,10 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
     const id = `mermaid-${Date.now()}`;
     setError(null);
 
+    const sanitized = sanitizeMermaidCode(code);
+
     mermaid
-      .render(id, code)
+      .render(id, sanitized)
       .then(({ svg }) => {
         if (containerRef.current) {
           containerRef.current.innerHTML = svg;

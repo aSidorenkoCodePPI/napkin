@@ -8,7 +8,7 @@ interface WhiteboardCanvasProps {
 export function WhiteboardCanvas({ onMount }: WhiteboardCanvasProps) {
   return (
     <div className="canvas-container">
-      <Tldraw onMount={onMount} />
+      <Tldraw persistenceKey="napkin" onMount={onMount} />
     </div>
   );
 }

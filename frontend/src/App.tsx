@@ -1,11 +1,14 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { WhiteboardCanvas } from './components/WhiteboardCanvas';
 import { ReportModal } from './components/ReportModal';
 import { LoadingOverlay } from './components/LoadingOverlay';
+import { RegionSelect } from './components/RegionSelect';
+import { InsightPanel } from './components/InsightPanel';
 import { useCanvasSnapshot } from './hooks/useCanvasSnapshot';
 import { useGeminiAnalysis } from './hooks/useGeminiAnalysis';
 import { useVoiceInput } from './hooks/useVoiceInput';
 import { useShapeGenerator } from './hooks/useShapeGenerator';
+import type { RegionBounds } from './hooks/useShapeGenerator';
 import { Editor } from 'tldraw';
 import './App.css';
 
@@ -17,16 +20,91 @@ function App() {
   const { setEditor: setSnapshotEditor, captureSnapshot } = useCanvasSnapshot();
   const { state, analyzeAll, reset } = useGeminiAnalysis();
   const { isListening, transcript, isSupported, startListening, stopListening } = useVoiceInput();
+  const [insightOpen, setInsightOpen] = useState(false);
   const [transforming, setTransforming] = useState(false);
   const [showGithubModal, setShowGithubModal] = useState(false);
   const [githubUrl, setGithubUrl] = useState('');
   const [importingGithub, setImportingGithub] = useState(false);
-  const { setEditor: setGenEditor, generate, transform, importGithub } = useShapeGenerator();
+  const { setEditor: setGenEditor, generate, generateRegion, transform, importGithub } = useShapeGenerator();
+
+  // Region mode state
+  const [regionMode, setRegionMode] = useState(false);
+  const [regionRect, setRegionRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [regionPageRect, setRegionPageRect] = useState<RegionBounds | null>(null);
+  const editorRef = useRef<Editor | null>(null);
 
   const handleEditorMount = useCallback((editor: Editor) => {
     setSnapshotEditor(editor);
     setGenEditor(editor);
+    editorRef.current = editor;
   }, [setSnapshotEditor, setGenEditor]);
+
+  // Keyboard shortcut: G to enter region mode, Escape to cancel
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger if typing in an input/textarea
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+      if (e.key === 'g' || e.key === 'G') {
+        if (!generating && !transforming && !regionMode) {
+          e.preventDefault();
+          setRegionMode(true);
+        }
+      } else if (e.key === 'Escape') {
+        if (regionMode) {
+          e.preventDefault();
+          setRegionMode(false);
+          setRegionRect(null);
+          setRegionPageRect(null);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [generating, transforming, regionMode]);
+
+  const handleRegionDrawn = useCallback((screenRect: { x: number; y: number; w: number; h: number }) => {
+    setRegionRect(screenRect);
+
+    // Convert screen rect corners to page coords
+    const editor = editorRef.current;
+    if (editor) {
+      const topLeft = editor.screenToPage({ x: screenRect.x, y: screenRect.y + 52 }); // +52 for topbar height
+      const bottomRight = editor.screenToPage({ x: screenRect.x + screenRect.w, y: screenRect.y + screenRect.h + 52 });
+      setRegionPageRect({
+        x: topLeft.x,
+        y: topLeft.y,
+        w: bottomRight.x - topLeft.x,
+        h: bottomRight.y - topLeft.y,
+      });
+    }
+  }, []);
+
+  const handleRegionCancel = useCallback(() => {
+    setRegionMode(false);
+    setRegionRect(null);
+    setRegionPageRect(null);
+  }, []);
+
+  const handleRegionGenerate = useCallback(async (text: string) => {
+    if (!text.trim() || !regionPageRect) return;
+    setGenerating(true);
+    setGenStatus(`Region: "${text}"`);
+    try {
+      const count = await generateRegion(text, captureSnapshot, regionPageRect);
+      setGenStatus(`Updated ${count} shape${count !== 1 ? 's' : ''} in region`);
+      setTimeout(() => setGenStatus(''), 3000);
+    } catch (err) {
+      setGenStatus(`Error: ${err instanceof Error ? err.message : 'Generation failed'}`);
+      setTimeout(() => setGenStatus(''), 5000);
+    } finally {
+      setGenerating(false);
+      setRegionMode(false);
+      setRegionRect(null);
+      setRegionPageRect(null);
+    }
+  }, [generateRegion, captureSnapshot, regionPageRect]);
 
   const handleAnalyze = useCallback(async () => {
     const base64 = await captureSnapshot();
@@ -95,6 +173,11 @@ function App() {
     }
   }, [githubUrl, importGithub]);
 
+  const handleApplyRecommendation = useCallback(async (prompt: string) => {
+    const augmented = prompt + '\n\nIMPORTANT: Place any new shapes in free space on the canvas. Do NOT overlap with existing shapes. Find empty grid positions that are not occupied.';
+    return await generate(augmented, captureSnapshot);
+  }, [generate, captureSnapshot]);
+
   const handlePromptSubmit = useCallback(() => {
     if (!promptText.trim() || generating) return;
     const text = promptText;
@@ -152,6 +235,25 @@ function App() {
               </svg>
             </button>
           </div>
+
+          {/* Region select button */}
+          <button
+            className={`btn-region ${regionMode ? 'active' : ''}`}
+            onClick={() => {
+              if (regionMode) {
+                handleRegionCancel();
+              } else {
+                setRegionMode(true);
+              }
+            }}
+            disabled={generating || transforming}
+            title="Region select — draw a rectangle to scope AI changes (G)"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="4 2">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            </svg>
+            Region
+          </button>
 
           {/* Voice button */}
           {isSupported && (
@@ -231,11 +333,41 @@ function App() {
               </>
             )}
           </button>
+
+          {/* Insights button */}
+          <button
+            className={`btn-insight ${insightOpen ? 'active' : ''}`}
+            onClick={() => setInsightOpen(!insightOpen)}
+            disabled={generating || transforming}
+            title="Architecture insights & optimization"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="9" y1="18" x2="15" y2="18" />
+              <line x1="10" y1="22" x2="14" y2="22" />
+              <path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14" />
+            </svg>
+            Insights
+          </button>
         </div>
       </div>
 
       <div className="canvas-wrapper">
         <WhiteboardCanvas onMount={handleEditorMount} />
+
+        {/* Region select overlay */}
+        {regionMode && (
+          <RegionSelect
+            regionRect={regionRect}
+            onDrawn={handleRegionDrawn}
+            onSubmit={handleRegionGenerate}
+            onCancel={handleRegionCancel}
+            generating={generating}
+            isListening={isListening}
+            isSupported={isSupported}
+            startListening={startListening}
+            stopListening={stopListening}
+          />
+        )}
       </div>
 
       {/* Generating overlay */}
@@ -310,6 +442,13 @@ function App() {
       {showReport && state.result && (
         <ReportModal result={state.result} onClose={handleCloseReport} />
       )}
+
+      <InsightPanel
+        open={insightOpen}
+        onClose={() => setInsightOpen(false)}
+        captureSnapshot={captureSnapshot}
+        onApplyRecommendation={handleApplyRecommendation}
+      />
     </div>
   );
 }

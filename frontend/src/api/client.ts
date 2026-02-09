@@ -61,6 +61,8 @@ export interface ExistingShapeInfo {
   label: string;
   x: number;
   y: number;
+  from_id?: number;
+  to_id?: number;
 }
 
 export async function generateShapes(

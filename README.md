@@ -12,6 +12,7 @@ Napkin is an AI-powered collaborative canvas that turns rough sketches, voice co
 - **Generate diagrams from text** -- describe what you want and watch it appear
 - **Transform sketches** -- draw rough shapes and let AI clean them into structured diagrams
 - **Analyze anything** -- get auto-labels, Mermaid diagrams, improvement suggestions, and detailed explanations in one click
+- **Insights panel** -- slide-in side panel with Optimize (actionable recommendations you can apply to the canvas with one click) and Explain (architecture summary) tabs
 - **Voice input** -- speak your diagram into existence using the built-in speech-to-text
 - **GitHub import** -- paste a repo URL and get an architecture diagram generated from its structure
 
@@ -120,16 +121,26 @@ Open [http://localhost:5173](http://localhost:5173) and start drawing.
 
 ### Analyze Mode
 
-Runs 4 AI analyses in parallel on your canvas content:
+Runs 5 AI analyses in parallel on your canvas content:
 
-| Analysis | Output                                      |
-| -------- | ------------------------------------------- |
-| Label    | Identifies and names every element           |
-| Cleanup  | Converts to a clean Mermaid.js diagram       |
-| Suggest  | Prioritized improvement suggestions          |
-| Explain  | Detailed markdown explanation of the content |
+| Analysis | Output                                       |
+| -------- | -------------------------------------------- |
+| Label    | Identifies and names every element            |
+| Cleanup  | Converts to a clean Mermaid.js diagram        |
+| Suggest  | Prioritized improvement suggestions           |
+| Explain  | Detailed markdown explanation of the content  |
+| Optimize | Actionable architecture optimization advice   |
 
 Results are presented in a downloadable PDF report.
+
+### Insights Panel
+
+A lightweight side panel that slides in from the right with two tabs:
+
+- **Optimize** -- Analyzes your architecture diagram and generates prioritized recommendations across performance, security, structure, and scalability. Each recommendation has an **Apply** button that directly modifies the canvas (adds, edits, or removes shapes) to implement the suggestion.
+- **Explain** -- Provides a concise architecture summary rendered as markdown.
+
+Each tab lazily fetches results on first click and caches them until the panel is closed.
 
 ### Generate Mode
 
@@ -162,7 +173,7 @@ napkin/
 │   ├── src/
 │   │   ├── App.tsx         # Main application
 │   │   ├── api/            # Backend API client
-│   │   ├── components/     # UI components
+│   │   ├── components/     # UI components (InsightPanel, ReportModal, etc.)
 │   │   ├── hooks/          # Custom React hooks
 │   │   └── types/          # TypeScript definitions
 │   └── package.json

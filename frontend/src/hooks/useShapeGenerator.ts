@@ -9,6 +9,7 @@ interface ShapeData {
   x?: number;
   y?: number;
   props: Record<string, unknown>;
+  action?: 'add' | 'edit' | 'delete';
 }
 
 interface RichTextDoc {
@@ -17,6 +18,13 @@ interface RichTextDoc {
     type: string;
     content?: Array<{ type: string; text?: string }>;
   }>;
+}
+
+export interface RegionBounds {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 function extractTextFromRichText(rt: unknown): string {
@@ -32,6 +40,23 @@ function extractTextFromRichText(rt: unknown): string {
     }
   }
   return parts.join(' ');
+}
+
+const VALID_GEO_TYPES = new Set([
+  'cloud', 'rectangle', 'ellipse', 'triangle', 'diamond', 'pentagon',
+  'hexagon', 'octagon', 'star', 'rhombus', 'rhombus-2', 'oval',
+  'trapezoid', 'arrow-right', 'arrow-left', 'arrow-up', 'arrow-down',
+  'x-box', 'check-box', 'heart',
+]);
+
+function sanitizeGeoType(geo: string): string {
+  if (VALID_GEO_TYPES.has(geo)) return geo;
+  // Map common invalid types to closest valid ones
+  if (geo === 'cylinder' || geo === 'database' || geo === 'barrel') return 'ellipse';
+  if (geo === 'circle') return 'ellipse';
+  if (geo === 'square' || geo === 'box') return 'rectangle';
+  if (geo === 'parallelogram') return 'trapezoid';
+  return 'rectangle';
 }
 
 function cleanJsonResponse(text: string): string {
@@ -84,29 +109,18 @@ function computeArrowAnchorOffsets(
       isVertical = dy > dx;
     }
 
-    const spread = 0.2;
+    const spread = 0.35;
     for (let i = 0; i < indices.length; i++) {
       const offset = -spread + (2 * spread * i) / (indices.length - 1);
       if (isVertical) {
-        // Vertical pair: offset on x-axis so arrows separate horizontally
         offsets.set(indices[i], { x: offset, y: 0 });
       } else {
-        // Horizontal pair: offset on y-axis so arrows separate vertically
         offsets.set(indices[i], { x: 0, y: offset });
       }
     }
   }
 
   return offsets;
-}
-
-/**
- * Pick arrow text size based on label length.
- */
-function arrowTextSize(text: string): string {
-  if (!text) return 'l';
-  if (text.length > 10) return 'xl';
-  return 'l';
 }
 
 function createArrowsWithBindings(
@@ -136,8 +150,8 @@ function createArrowsWithBindings(
       props: {
         richText: toRichText(text),
         color: (p.color as string) || 'black',
-        dash: (p.dash as string) || 'draw',
-        size: (p.size as string) || arrowTextSize(text),
+        dash: (p.dash as string) || 'solid',
+        size: (p.size as string) || 'm',
         font: 'draw',
       },
     });
@@ -183,6 +197,314 @@ function createArrowsWithBindings(
   return arrows.length;
 }
 
+/**
+ * Shared 3-pass processing: deletes, edits, adds.
+ * Used by both generate() and generateRegion().
+ */
+function processShapeResponse(
+  editor: Editor,
+  shapeDataArray: ShapeData[],
+  idMap: Map<number, TLShapeId>,
+  existingInfo: ExistingShapeInfo[],
+  options?: { skipZoomToFit?: boolean }
+): number {
+  // --- Pass 1: Deletes ---
+  const deleteTlIds: TLShapeId[] = [];
+  for (const shape of shapeDataArray) {
+    if (shape.action !== 'delete') continue;
+    const tlId = idMap.get(shape.id);
+    if (tlId) deleteTlIds.push(tlId);
+  }
+  if (deleteTlIds.length > 0) {
+    editor.deleteShapes(deleteTlIds);
+  }
+
+  // --- Pass 2: Edits ---
+  for (const shape of shapeDataArray) {
+    if (shape.action !== 'edit') continue;
+    const tlId = idMap.get(shape.id);
+    if (!tlId) continue;
+
+    const existing = editor.getShape(tlId);
+    if (!existing) continue;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const update: Record<string, any> = { id: tlId, type: existing.type };
+    if (shape.x != null) update.x = shape.x;
+    if (shape.y != null) update.y = shape.y;
+
+    if (shape.props && Object.keys(shape.props).length > 0) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const propUpdates: Record<string, any> = {};
+      const p = shape.props;
+      for (const [key, value] of Object.entries(p)) {
+        // Skip arrow connection fields — these are handled via bindings, not props
+        if (key === 'from' || key === 'to') continue;
+        if (key === 'text') {
+          propUpdates.richText = toRichText(value as string);
+        } else if (key === 'w' || key === 'h') {
+          propUpdates[key] = value as number;
+        } else if (key === 'geo') {
+          propUpdates[key] = sanitizeGeoType(value as string);
+        } else {
+          propUpdates[key] = value;
+        }
+      }
+      update.props = propUpdates;
+    }
+
+    editor.updateShape(update);
+  }
+
+  // --- Pass 3: Adds (default behavior) ---
+  const addShapes = shapeDataArray.filter(
+    (s) => !s.action || s.action === 'add'
+  );
+
+  const nonArrows: ShapeData[] = [];
+  const arrows: ShapeData[] = [];
+
+  for (const shape of addShapes) {
+    if (shape.type === 'arrow') {
+      arrows.push(shape);
+    } else {
+      nonArrows.push(shape);
+    }
+  }
+
+  const newShapes = nonArrows
+    .filter((shape) => !idMap.has(shape.id))
+    .map((shape) => {
+      const tlId = createShapeId();
+      idMap.set(shape.id, tlId);
+
+      const p = shape.props;
+      switch (shape.type) {
+        case 'geo':
+          return {
+            id: tlId,
+            type: 'geo' as const,
+            x: shape.x ?? 100,
+            y: shape.y ?? 100,
+            props: {
+              w: (p.w as number) || 200,
+              h: (p.h as number) || 100,
+              geo: sanitizeGeoType((p.geo as string) || 'rectangle'),
+              richText: toRichText((p.text as string) || ''),
+              color: (p.color as string) || 'black',
+              fill: (p.fill as string) || 'semi',
+              dash: (p.dash as string) || 'draw',
+              size: (p.size as string) || 'm',
+              font: 'draw',
+            },
+          };
+        case 'text':
+          return {
+            id: tlId,
+            type: 'text' as const,
+            x: shape.x ?? 100,
+            y: shape.y ?? 50,
+            props: {
+              richText: toRichText((p.text as string) || ''),
+              color: (p.color as string) || 'black',
+              size: (p.size as string) || 'm',
+              font: 'draw',
+            },
+          };
+        case 'note':
+          return {
+            id: tlId,
+            type: 'note' as const,
+            x: shape.x ?? 100,
+            y: shape.y ?? 100,
+            props: {
+              richText: toRichText((p.text as string) || ''),
+              color: (p.color as string) || 'yellow',
+              size: (p.size as string) || 'm',
+              font: 'draw',
+            },
+          };
+        default:
+          return null;
+      }
+    })
+    .filter(Boolean);
+
+  if (newShapes.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    editor.createShapes(newShapes as any);
+  }
+
+  // Build position map from existing shapes + newly generated shapes
+  const shapePositions = new Map<number, { x: number; y: number }>();
+  for (const info of existingInfo) {
+    shapePositions.set(info.id, { x: info.x, y: info.y });
+  }
+  for (const shape of nonArrows) {
+    if (shape.x != null && shape.y != null) {
+      shapePositions.set(shape.id, { x: shape.x, y: shape.y });
+    }
+  }
+
+  const arrowCount = createArrowsWithBindings(editor, arrows, idMap, shapePositions);
+
+  const totalCreated = newShapes.length + arrowCount;
+  const totalDeleted = deleteTlIds.length;
+  const totalEdited = shapeDataArray.filter((s) => s.action === 'edit').length;
+
+  if (!options?.skipZoomToFit) {
+    const allShapes = editor.getCurrentPageShapes();
+    if (allShapes.length > 0) {
+      editor.zoomToFit({ animation: { duration: 400 } });
+    }
+  }
+
+  return totalCreated + totalDeleted + totalEdited;
+}
+
+/**
+ * Build existingInfo and idMap from a set of shapes (two-pass: non-arrows then arrows).
+ */
+function buildExistingShapeInfo(
+  editor: Editor,
+  shapes: ReturnType<Editor['getCurrentPageShapes']>
+): { idMap: Map<number, TLShapeId>; existingInfo: ExistingShapeInfo[] } {
+  const idMap = new Map<number, TLShapeId>();
+  const existingInfo: ExistingShapeInfo[] = [];
+  let nextId = 0;
+  const tlIdToIntId = new Map<TLShapeId, number>();
+
+  // First pass: non-arrow shapes
+  for (const shape of shapes) {
+    if (shape.type === 'arrow') continue;
+
+    const props = shape.props as Record<string, unknown>;
+    let label = '';
+    if (props.richText) {
+      label = extractTextFromRichText(props.richText);
+    } else if (props.text && typeof props.text === 'string') {
+      label = props.text;
+    }
+
+    const id = nextId++;
+    idMap.set(id, shape.id);
+    tlIdToIntId.set(shape.id, id);
+    existingInfo.push({
+      id,
+      type: shape.type,
+      label: label || `(unlabeled ${shape.type})`,
+      x: Math.round(shape.x),
+      y: Math.round(shape.y),
+    });
+  }
+
+  // Second pass: arrows with from/to connections
+  for (const shape of shapes) {
+    if (shape.type !== 'arrow') continue;
+
+    const props = shape.props as Record<string, unknown>;
+    let label = '';
+    if (props.richText) {
+      label = extractTextFromRichText(props.richText);
+    } else if (props.text && typeof props.text === 'string') {
+      label = props.text;
+    }
+
+    const bindings = editor.getBindingsFromShape(shape, 'arrow');
+    let fromIntId: number | undefined;
+    let toIntId: number | undefined;
+    for (const binding of bindings) {
+      const bProps = binding.props as Record<string, unknown>;
+      const targetIntId = tlIdToIntId.get(binding.toId);
+      if (targetIntId != null) {
+        if (bProps.terminal === 'start') fromIntId = targetIntId;
+        else if (bProps.terminal === 'end') toIntId = targetIntId;
+      }
+    }
+
+    const id = nextId++;
+    idMap.set(id, shape.id);
+    existingInfo.push({
+      id,
+      type: 'arrow',
+      label: label || '(arrow)',
+      x: 0,
+      y: 0,
+      from_id: fromIntId,
+      to_id: toIntId,
+    });
+  }
+
+  return { idMap, existingInfo };
+}
+
+/**
+ * Find shapes whose page bounds intersect with the given region bounds.
+ * For arrows, also include if either bound endpoint shape is in the region.
+ */
+function shapesInRegion(
+  editor: Editor,
+  bounds: RegionBounds
+): ReturnType<Editor['getCurrentPageShapes']> {
+  const allShapes = editor.getCurrentPageShapes();
+  const regionRight = bounds.x + bounds.w;
+  const regionBottom = bounds.y + bounds.h;
+
+  // First pass: find non-arrow shapes in region
+  const inRegionIds = new Set<TLShapeId>();
+  const result: typeof allShapes = [];
+
+  for (const shape of allShapes) {
+    if (shape.type === 'arrow') continue;
+    const shapeBounds = editor.getShapePageBounds(shape.id);
+    if (!shapeBounds) continue;
+
+    // AABB intersection: two rects overlap if neither is fully outside
+    const overlaps =
+      shapeBounds.x < regionRight &&
+      shapeBounds.x + shapeBounds.w > bounds.x &&
+      shapeBounds.y < regionBottom &&
+      shapeBounds.y + shapeBounds.h > bounds.y;
+
+    if (overlaps) {
+      inRegionIds.add(shape.id);
+      result.push(shape);
+    }
+  }
+
+  // Second pass: include arrows if they connect to shapes in the region
+  for (const shape of allShapes) {
+    if (shape.type !== 'arrow') continue;
+
+    const bindings = editor.getBindingsFromShape(shape, 'arrow');
+    let connected = false;
+    for (const binding of bindings) {
+      if (inRegionIds.has(binding.toId)) {
+        connected = true;
+        break;
+      }
+    }
+
+    // Also check if arrow's own bounds intersect
+    if (!connected) {
+      const shapeBounds = editor.getShapePageBounds(shape.id);
+      if (shapeBounds) {
+        connected =
+          shapeBounds.x < regionRight &&
+          shapeBounds.x + shapeBounds.w > bounds.x &&
+          shapeBounds.y < regionBottom &&
+          shapeBounds.y + shapeBounds.h > bounds.y;
+      }
+    }
+
+    if (connected) {
+      result.push(shape);
+    }
+  }
+
+  return result;
+}
+
 export function useShapeGenerator() {
   const editorRef = useRef<Editor | null>(null);
 
@@ -200,139 +522,70 @@ export function useShapeGenerator() {
     const existingShapes = editor.getCurrentPageShapes();
     let imageBase64: string | null = null;
 
-    // Build existing shapes info for the API and pre-populate ID map
     const idMap = new Map<number, TLShapeId>();
     const existingInfo: ExistingShapeInfo[] = [];
 
     if (existingShapes.length > 0) {
       imageBase64 = await captureSnapshot();
 
-      // Assign integer IDs to existing shapes (skip arrows/text for now, focus on connectable shapes)
-      let nextId = 0;
-      for (const shape of existingShapes) {
-        if (shape.type === 'arrow') continue; // arrows aren't targets for connections
-
-        const props = shape.props as Record<string, unknown>;
-        let label = '';
-        if (props.richText) {
-          label = extractTextFromRichText(props.richText);
-        } else if (props.text && typeof props.text === 'string') {
-          label = props.text;
-        }
-
-        const id = nextId++;
-        idMap.set(id, shape.id);
-        existingInfo.push({
-          id,
-          type: shape.type,
-          label: label || `(unlabeled ${shape.type})`,
-          x: Math.round(shape.x),
-          y: Math.round(shape.y),
-        });
-      }
+      const built = buildExistingShapeInfo(editor, existingShapes);
+      // Copy into our local maps
+      for (const [k, v] of built.idMap) idMap.set(k, v);
+      existingInfo.push(...built.existingInfo);
     }
 
     const rawResult = await generateShapes(prompt, imageBase64, existingInfo.length > 0 ? existingInfo : undefined);
     const shapeDataArray = JSON.parse(cleanJsonResponse(rawResult)) as ShapeData[];
 
-    // Separate arrows from non-arrows
-    const nonArrows: ShapeData[] = [];
-    const arrows: ShapeData[] = [];
+    return processShapeResponse(editor, shapeDataArray, idMap, existingInfo);
+  }, []);
 
-    for (const shape of shapeDataArray) {
-      if (shape.type === 'arrow') {
-        arrows.push(shape);
-      } else {
-        nonArrows.push(shape);
+  const generateRegion = useCallback(async (
+    prompt: string,
+    captureSnapshot: () => Promise<string | null>,
+    regionBounds: RegionBounds
+  ) => {
+    const editor = editorRef.current;
+    if (!editor) throw new Error('Editor not ready');
+
+    // Find shapes in the region
+    const regionShapes = shapesInRegion(editor, regionBounds);
+
+    let imageBase64: string | null = null;
+    if (regionShapes.length > 0) {
+      // Try to capture snapshot of just the region shapes
+      try {
+        const regionShapeIds = regionShapes.map((s) => s.id);
+        const { blob } = await editor.toImage(regionShapeIds, { format: 'png', quality: 0.8, scale: 1, padding: 20 });
+        imageBase64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const dataUrl = reader.result as string;
+            resolve(dataUrl.split(',')[1]);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      } catch {
+        // Fallback to full snapshot
+        imageBase64 = await captureSnapshot();
       }
     }
 
-    // Create new non-arrow shapes (skip if ID already in map = existing shape)
-    const newShapes = nonArrows
-      .filter((shape) => !idMap.has(shape.id))
-      .map((shape) => {
-        const tlId = createShapeId();
-        idMap.set(shape.id, tlId);
+    // Build existing info from region shapes only
+    const { idMap, existingInfo } = buildExistingShapeInfo(editor, regionShapes);
 
-        const p = shape.props;
-        switch (shape.type) {
-          case 'geo':
-            return {
-              id: tlId,
-              type: 'geo' as const,
-              x: shape.x ?? 100,
-              y: shape.y ?? 100,
-              props: {
-                w: (p.w as number) || 200,
-                h: (p.h as number) || 100,
-                geo: (p.geo as string) || 'rectangle',
-                richText: toRichText((p.text as string) || ''),
-                color: (p.color as string) || 'black',
-                fill: (p.fill as string) || 'semi',
-                dash: (p.dash as string) || 'draw',
-                size: (p.size as string) || 'm',
-                font: 'draw',
-              },
-            };
-          case 'text':
-            return {
-              id: tlId,
-              type: 'text' as const,
-              x: shape.x ?? 100,
-              y: shape.y ?? 50,
-              props: {
-                richText: toRichText((p.text as string) || ''),
-                color: (p.color as string) || 'black',
-                size: (p.size as string) || 'm',
-                font: 'draw',
-              },
-            };
-          case 'note':
-            return {
-              id: tlId,
-              type: 'note' as const,
-              x: shape.x ?? 100,
-              y: shape.y ?? 100,
-              props: {
-                richText: toRichText((p.text as string) || ''),
-                color: (p.color as string) || 'yellow',
-                size: (p.size as string) || 'm',
-                font: 'draw',
-              },
-            };
-          default:
-            return null;
-        }
-      })
-      .filter(Boolean);
+    // Augment prompt with region bounds
+    const bx1 = Math.round(regionBounds.x);
+    const by1 = Math.round(regionBounds.y);
+    const bx2 = Math.round(regionBounds.x + regionBounds.w);
+    const by2 = Math.round(regionBounds.y + regionBounds.h);
+    const augmentedPrompt = `${prompt}\n\nPlace all new shapes within x=${bx1} to x=${bx2}, y=${by1} to y=${by2}.`;
 
-    if (newShapes.length > 0) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      editor.createShapes(newShapes as any);
-    }
+    const rawResult = await generateShapes(augmentedPrompt, imageBase64, existingInfo.length > 0 ? existingInfo : undefined);
+    const shapeDataArray = JSON.parse(cleanJsonResponse(rawResult)) as ShapeData[];
 
-    // Build position map from existing shapes + newly generated shapes
-    const shapePositions = new Map<number, { x: number; y: number }>();
-    for (const info of existingInfo) {
-      shapePositions.set(info.id, { x: info.x, y: info.y });
-    }
-    for (const shape of nonArrows) {
-      if (shape.x != null && shape.y != null) {
-        shapePositions.set(shape.id, { x: shape.x, y: shape.y });
-      }
-    }
-
-    // Create arrows and bind to shapes (both existing and new)
-    const arrowCount = createArrowsWithBindings(editor, arrows, idMap, shapePositions);
-
-    const totalCreated = newShapes.length + arrowCount;
-
-    const allShapes = editor.getCurrentPageShapes();
-    if (allShapes.length > 0) {
-      editor.zoomToFit({ animation: { duration: 400 } });
-    }
-
-    return totalCreated;
+    return processShapeResponse(editor, shapeDataArray, idMap, existingInfo, { skipZoomToFit: true });
   }, []);
 
   const transform = useCallback(async (
@@ -353,98 +606,8 @@ export function useShapeGenerator() {
       editor.deleteShapes(existingShapes.map((s) => s.id));
     }
 
-    // Build new shapes
     const idMap = new Map<number, TLShapeId>();
-    const nonArrows: ShapeData[] = [];
-    const arrows: ShapeData[] = [];
-
-    for (const shape of shapeDataArray) {
-      if (shape.type === 'arrow') {
-        arrows.push(shape);
-      } else {
-        nonArrows.push(shape);
-      }
-    }
-
-    const newShapes = nonArrows
-      .map((shape) => {
-        const tlId = createShapeId();
-        idMap.set(shape.id, tlId);
-
-        const p = shape.props;
-        switch (shape.type) {
-          case 'geo':
-            return {
-              id: tlId,
-              type: 'geo' as const,
-              x: shape.x ?? 100,
-              y: shape.y ?? 100,
-              props: {
-                w: (p.w as number) || 200,
-                h: (p.h as number) || 100,
-                geo: (p.geo as string) || 'rectangle',
-                richText: toRichText((p.text as string) || ''),
-                color: (p.color as string) || 'black',
-                fill: (p.fill as string) || 'semi',
-                dash: (p.dash as string) || 'draw',
-                size: (p.size as string) || 'm',
-                font: 'draw',
-              },
-            };
-          case 'text':
-            return {
-              id: tlId,
-              type: 'text' as const,
-              x: shape.x ?? 100,
-              y: shape.y ?? 50,
-              props: {
-                richText: toRichText((p.text as string) || ''),
-                color: (p.color as string) || 'black',
-                size: (p.size as string) || 'm',
-                font: 'draw',
-              },
-            };
-          case 'note':
-            return {
-              id: tlId,
-              type: 'note' as const,
-              x: shape.x ?? 100,
-              y: shape.y ?? 100,
-              props: {
-                richText: toRichText((p.text as string) || ''),
-                color: (p.color as string) || 'yellow',
-                size: (p.size as string) || 'm',
-                font: 'draw',
-              },
-            };
-          default:
-            return null;
-        }
-      })
-      .filter(Boolean);
-
-    if (newShapes.length > 0) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      editor.createShapes(newShapes as any);
-    }
-
-    const shapePositions = new Map<number, { x: number; y: number }>();
-    for (const shape of nonArrows) {
-      if (shape.x != null && shape.y != null) {
-        shapePositions.set(shape.id, { x: shape.x, y: shape.y });
-      }
-    }
-
-    const arrowCount = createArrowsWithBindings(editor, arrows, idMap, shapePositions);
-
-    const totalCreated = newShapes.length + arrowCount;
-
-    const allShapes = editor.getCurrentPageShapes();
-    if (allShapes.length > 0) {
-      editor.zoomToFit({ animation: { duration: 400 } });
-    }
-
-    return totalCreated;
+    return processShapeResponse(editor, shapeDataArray, idMap, []);
   }, []);
 
   const importGithub = useCallback(async (repoUrl: string) => {
@@ -461,97 +624,8 @@ export function useShapeGenerator() {
     }
 
     const idMap = new Map<number, TLShapeId>();
-    const nonArrows: ShapeData[] = [];
-    const arrows: ShapeData[] = [];
-
-    for (const shape of shapeDataArray) {
-      if (shape.type === 'arrow') {
-        arrows.push(shape);
-      } else {
-        nonArrows.push(shape);
-      }
-    }
-
-    const newShapes = nonArrows
-      .map((shape) => {
-        const tlId = createShapeId();
-        idMap.set(shape.id, tlId);
-
-        const p = shape.props;
-        switch (shape.type) {
-          case 'geo':
-            return {
-              id: tlId,
-              type: 'geo' as const,
-              x: shape.x ?? 100,
-              y: shape.y ?? 100,
-              props: {
-                w: (p.w as number) || 200,
-                h: (p.h as number) || 100,
-                geo: (p.geo as string) || 'rectangle',
-                richText: toRichText((p.text as string) || ''),
-                color: (p.color as string) || 'black',
-                fill: (p.fill as string) || 'semi',
-                dash: (p.dash as string) || 'draw',
-                size: (p.size as string) || 'm',
-                font: 'draw',
-              },
-            };
-          case 'text':
-            return {
-              id: tlId,
-              type: 'text' as const,
-              x: shape.x ?? 100,
-              y: shape.y ?? 50,
-              props: {
-                richText: toRichText((p.text as string) || ''),
-                color: (p.color as string) || 'black',
-                size: (p.size as string) || 'm',
-                font: 'draw',
-              },
-            };
-          case 'note':
-            return {
-              id: tlId,
-              type: 'note' as const,
-              x: shape.x ?? 100,
-              y: shape.y ?? 100,
-              props: {
-                richText: toRichText((p.text as string) || ''),
-                color: (p.color as string) || 'yellow',
-                size: (p.size as string) || 'm',
-                font: 'draw',
-              },
-            };
-          default:
-            return null;
-        }
-      })
-      .filter(Boolean);
-
-    if (newShapes.length > 0) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      editor.createShapes(newShapes as any);
-    }
-
-    const shapePositions = new Map<number, { x: number; y: number }>();
-    for (const shape of nonArrows) {
-      if (shape.x != null && shape.y != null) {
-        shapePositions.set(shape.id, { x: shape.x, y: shape.y });
-      }
-    }
-
-    const arrowCount = createArrowsWithBindings(editor, arrows, idMap, shapePositions);
-
-    const totalCreated = newShapes.length + arrowCount;
-
-    const allShapes = editor.getCurrentPageShapes();
-    if (allShapes.length > 0) {
-      editor.zoomToFit({ animation: { duration: 400 } });
-    }
-
-    return totalCreated;
+    return processShapeResponse(editor, shapeDataArray, idMap, []);
   }, []);
 
-  return { setEditor, generate, transform, importGithub };
+  return { setEditor, generate, generateRegion, transform, importGithub };
 }

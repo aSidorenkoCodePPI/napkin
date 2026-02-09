@@ -1,4 +1,4 @@
-export type AnalysisMode = 'label' | 'cleanup' | 'suggest' | 'explain';
+export type AnalysisMode = 'label' | 'cleanup' | 'suggest' | 'explain' | 'optimize';
 
 export interface LabelItem {
   name: string;
@@ -28,6 +28,19 @@ export interface FullAnalysisResult {
   cleanupResult: string | null;
   suggestResult: SuggestResult | null;
   explainResult: string | null;
+}
+
+export interface OptimizeRecommendation {
+  title: string;
+  description: string;
+  priority: 'high' | 'medium' | 'low';
+  category: 'performance' | 'security' | 'structure' | 'scalability';
+  diagram_prompt: string;
+}
+
+export interface OptimizeResult {
+  summary: string;
+  recommendations: OptimizeRecommendation[];
 }
 
 export interface AnalysisState {

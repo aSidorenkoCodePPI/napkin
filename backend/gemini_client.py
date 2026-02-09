@@ -17,6 +17,15 @@ class GeminiClient:
         self.client = genai.Client(api_key=api_key)
         self.model = "gemini-3-flash"
 
+        # Disable thinking for fast structured output (generate, transform)
+        self.fast_config = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        )
+        # Low thinking budget for analysis (needs some reasoning but not full)
+        self.analyze_config = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_budget=1024),
+        )
+
     def _analyze_sync(self, mode: str, image_bytes: bytes) -> str:
         prompt = PROMPTS.get(mode)
         if not prompt:
@@ -27,6 +36,7 @@ class GeminiClient:
         response = self.client.models.generate_content(
             model=self.model,
             contents=[prompt, image_part],
+            config=self.analyze_config,
         )
         return response.text
 
@@ -49,6 +59,7 @@ class GeminiClient:
         response = self.client.models.generate_content(
             model=self.model,
             contents=contents,
+            config=self.fast_config,
         )
         return response.text
 
@@ -61,6 +72,7 @@ class GeminiClient:
         response = self.client.models.generate_content(
             model=self.model,
             contents=[TRANSFORM_PROMPT, image_part],
+            config=self.fast_config,
         )
         return response.text
 
@@ -73,6 +85,7 @@ class GeminiClient:
         response = self.client.models.generate_content(
             model=self.model,
             contents=[prompt],
+            config=self.fast_config,
         )
         return response.text
 
