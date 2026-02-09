@@ -106,7 +106,7 @@ Open [http://localhost:5173](http://localhost:5173) and start drawing.
                         |
                   +-----v-----+
                   |  Gemini   |
-                  |  2.5 Flash|
+                  |  3 Flash  |
                   +-----------+
 ```
 
