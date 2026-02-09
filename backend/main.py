@@ -23,9 +23,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = GeminiClient()
+_client = None
+
+
+def get_client():
+    global _client
+    if _client is None:
+        _client = GeminiClient()
+    return _client
+
 
 VALID_MODES = {"label", "cleanup", "suggest", "explain", "optimize"}
+
+
+@app.get("/api/health")
+async def health():
+    has_key = bool(os.environ.get("GEMINI_API_KEY"))
+    return {"status": "ok", "has_gemini_key": has_key, "port": os.environ.get("PORT", "not set")}
 
 
 class AnalyzeRequest(BaseModel):
@@ -52,7 +66,7 @@ async def analyze(mode: str, request: AnalyzeRequest):
         raise HTTPException(status_code=400, detail=f"Invalid mode: {mode}. Must be one of {VALID_MODES}")
 
     try:
-        result = await client.analyze(mode, request.image_base64)
+        result = await get_client().analyze(mode, request.image_base64)
         return {"result": result, "mode": mode}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -61,7 +75,7 @@ async def analyze(mode: str, request: AnalyzeRequest):
 @app.post("/api/transform")
 async def transform(request: AnalyzeRequest):
     try:
-        result = await client.transform(request.image_base64)
+        result = await get_client().transform(request.image_base64)
         return {"result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -75,7 +89,7 @@ class GithubAnalyzeRequest(BaseModel):
 async def github_analyze(request: GithubAnalyzeRequest):
     try:
         repo_context = await fetch_repo_context(request.repo_url)
-        result = await client.analyze_repo(repo_context)
+        result = await get_client().analyze_repo(repo_context)
         return {"result": result}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -87,7 +101,7 @@ async def github_analyze(request: GithubAnalyzeRequest):
 async def generate(request: GenerateRequest):
     try:
         existing = [s.model_dump() for s in request.existing_shapes]
-        result = await client.generate(request.prompt, request.image_base64, existing)
+        result = await get_client().generate(request.prompt, request.image_base64, existing)
         return {"result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
